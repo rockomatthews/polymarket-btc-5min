@@ -33,10 +33,13 @@ export async function fetchMarkets(host: string, cursor?: string, limit = 200): 
   return (await res.json()) as MarketsResponse;
 }
 
-export async function autoPickMarkets(host: string, targetCount = 8): Promise<Market[]> {
+import { isLikelyBtc5MinMarket } from "./filter";
+
+export async function autoPickMarkets(host: string, targetCount = 12): Promise<Market[]> {
   const picked: Market[] = [];
   let cursor: string | undefined;
-  for (let i = 0; i < 20 && picked.length < targetCount; i++) {
+
+  for (let i = 0; i < 30 && picked.length < targetCount; i++) {
     const page = await fetchMarkets(host, cursor, 200);
     cursor = page.next_cursor;
 
@@ -47,8 +50,11 @@ export async function autoPickMarkets(host: string, targetCount = 8): Promise<Ma
       if (m.archived) continue;
       if (!m.accepting_orders) continue;
       if (!m.enable_order_book) continue;
-      // Basic sanity: binary markets only (YES/NO)
       if (m.tokens.length !== 2) continue;
+
+      // BTC 5-minute-ish filter
+      if (!isLikelyBtc5MinMarket({ question: m.question, slug: m.market_slug })) continue;
+
       picked.push(m);
     }
 
