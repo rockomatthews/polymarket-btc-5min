@@ -1,6 +1,8 @@
 import { autoPickMarkets } from "./markets";
 import { bestAsk, fetchBook } from "./orderbook";
 import { log } from "./logger";
+import { computeSigmaAnnFromSpot, evaluateMarket, type SieveOpp } from "./sieve";
+import { loadState } from "./state";
 
 export type Alert = {
   marketSlug: string;
@@ -9,6 +11,12 @@ export type Alert = {
   bestNo: number | null;
   spread: number | null;
   reason: string;
+  side?: string;
+  edgeNet?: number;
+  pFairYes?: number;
+  strike?: number;
+  dtSec?: number;
+  sigmaAnn?: number;
 };
 
 function clobHost() {
@@ -17,9 +25,22 @@ function clobHost() {
 
 export async function runScannerOnce(): Promise<Alert[]> {
   const host = clobHost();
-  const markets = await autoPickMarkets(host, Number(process.env.MARKET_COUNT || "20"));
+  const markets = await autoPickMarkets(host, Number(process.env.MARKET_COUNT || "40"));
 
-  const alerts: Alert[] = [];
+  // Spot + vol
+  const state = loadState();
+  const latest = state.spotHistory?.[state.spotHistory.length - 1];
+  const spot = latest?.price || null;
+  if (!spot) {
+    log.warn("no spot price available; skipping scan");
+    return [];
+  }
+
+  const sigma =
+    computeSigmaAnnFromSpot(state, Number(process.env.SIGMA_WINDOW_MS || String(60 * 60 * 1000))) ||
+    Number(process.env.SIGMA_FALLBACK || "0.8");
+
+  const opps: SieveOpp[] = [];
 
   for (const m of markets) {
     try {
@@ -32,29 +53,45 @@ export async function runScannerOnce(): Promise<Alert[]> {
         fetchBook(host, no.token_id),
       ]);
 
-      const yesAsk = bestAsk(yesBook);
-      const noAsk = bestAsk(noBook);
-      const bestYes = yesAsk ? yesAsk.price : null;
-      const bestNo = noAsk ? noAsk.price : null;
+      const yesAskTop = bestAsk(yesBook);
+      const noAskTop = bestAsk(noBook);
+      const yesAsk = yesAskTop ? yesAskTop.price : null;
+      const noAsk = noAskTop ? noAskTop.price : null;
 
-      // Placeholder mispricing metric: YES ask + NO ask should be ~1.
-      const spread = bestYes !== null && bestNo !== null ? bestYes + bestNo : null;
+      const opp = evaluateMarket({
+        market: m,
+        yesAsk,
+        noAsk,
+        spot,
+        sigmaAnn: sigma,
+        nowMs: Date.now(),
+      });
 
-      const EDGE_REQUIRED = Number(process.env.EDGE_REQUIRED || "0.01");
-      if (spread !== null && spread < 1 - EDGE_REQUIRED) {
-        alerts.push({
-          marketSlug: m.market_slug,
-          question: m.question,
-          bestYes,
-          bestNo,
-          spread,
-          reason: `cheap-box: yes+no=${spread.toFixed(4)} < ${(1 - EDGE_REQUIRED).toFixed(4)}`,
-        });
-      }
+      if (opp) opps.push(opp);
     } catch (e: any) {
       log(`scanner error market=${m?.market_slug}: ${e?.message || e}`);
     }
   }
 
-  return alerts;
+  opps.sort((a, b) => b.edgeNet - a.edgeNet);
+
+  return opps.slice(0, Number(process.env.TOP_N || "10")).map((o) => {
+    const bestYes = o.side === "BUY_YES" ? o.entryPrice : null;
+    const bestNo = o.side === "BUY_NO" ? o.entryPrice : null;
+    const spread = bestYes !== null && bestNo !== null ? bestYes + bestNo : null;
+    return {
+      marketSlug: o.marketSlug,
+      question: o.question,
+      bestYes,
+      bestNo,
+      spread,
+      side: o.side,
+      edgeNet: o.edgeNet,
+      pFairYes: o.pFairYes,
+      strike: o.strike,
+      dtSec: o.dtSec,
+      sigmaAnn: o.sigmaAnn,
+      reason: o.reason,
+    };
+  });
 }

@@ -11,6 +11,7 @@ export type Market = {
   neg_risk: boolean;
   maker_base_fee: number;
   taker_base_fee: number;
+  end_date_iso?: string;
   tokens: Array<{
     token_id: string;
     outcome: string;
